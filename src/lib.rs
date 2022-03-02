@@ -5,7 +5,8 @@ use std::num::NonZeroU8;
 use std::string::FromUtf8Error;
 
 pub mod common;
-pub mod runtime;
+pub mod json;
+// pub mod runtime;
 
 struct hello;
 
@@ -26,11 +27,17 @@ impl Endpoint for hello {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Represents an HTTP request.
+pub type Stream = crossbeam::channel::Sender<Response>;
+
 #[derive(Default)]
 pub struct Request {
     uri: String,
-    body: Body,
+    /// 用于传递参数
+    headers: String,
+    /// 用于传递大数据
+    body: Option<Bytes>,
+    /// 用于和请求人通信
+    stream: Stream,
 }
 
 #[derive(Default)]
@@ -42,9 +49,7 @@ impl Body {
         Self(None)
     }
     pub fn into_bytes(self) -> Result<Bytes, ReadBodyError> {
-        if let Some(body) = self.0 {
-
-        }
+        let data = val.take().map(Ok);
         hyper::body::to_bytes(self.0)
             .map_err(|err| ReadBodyError::Io(IoError::new(ErrorKind::Other, err)))
     }
