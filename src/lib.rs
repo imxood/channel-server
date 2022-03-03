@@ -1,13 +1,21 @@
+use add_data::{AddData, AddDataEndpoint};
+use ahash::AHashMap;
 use bytes::Bytes;
+use extensions::Extensions;
 use std::{
+    any::Any,
     fmt::{Debug, Formatter},
     ops::Deref,
 };
 
 use crate::json::Json;
 
+pub mod add_data;
 pub mod common;
+pub mod data;
+pub mod extensions;
 pub mod json;
+
 // pub mod runtime;
 
 pub type Stream = crossbeam::channel::Sender<Response>;
@@ -37,6 +45,8 @@ pub struct Request {
     body: Body,
     /// 接收端 用它 和请求端通信
     stream: Stream,
+    /// 主要是 Middleware 使用的
+    extensions: Extensions,
 }
 
 impl Request {
@@ -47,8 +57,20 @@ impl Request {
     }
 
     #[inline]
-    pub fn uri(&self) -> &String {
+    pub fn uri(&self) -> &str {
         &self.uri
+    }
+
+    /// Returns a reference to the associated extensions.
+    #[inline]
+    pub fn extensions(&self) -> &Extensions {
+        &self.extensions
+    }
+
+    /// Returns a mutable reference to the associated extensions.
+    #[inline]
+    pub fn extensions_mut(&mut self) -> &mut Extensions {
+        &mut self.extensions
     }
 }
 
@@ -208,6 +230,13 @@ pub enum Error {
     #[error("parse utf8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
 
+    #[error("路径未找到: {0}")]
+    PathNotFoundError(String),
+
+    /// 获取Data异常.
+    #[error("Get data 异常: {0}")]
+    GetDataError(String),
+
     #[error("异常: {0}")]
     Custom(String),
 }
@@ -234,6 +263,55 @@ impl<'a> FromRequest<'a> for String {
         let data = body.take()?;
         Ok(String::from_utf8(data.to_vec()).map_err(Error::Utf8)?)
     }
+}
+
+pub trait EndpointExt: IntoEndpoint {
+    fn data<T>(self, data: T) -> AddDataEndpoint<Self::Endpoint, T>
+    where
+        T: Clone + Send + Sync + 'static,
+        Self: Sized,
+    {
+        self.with(AddData::new(data))
+    }
+
+    fn with<T>(self, middleware: T) -> T::Output
+    where
+        T: Middleware<Self::Endpoint>,
+        Self: Sized,
+    {
+        middleware.transform(self.into_endpoint())
+    }
+}
+
+impl<T: IntoEndpoint> EndpointExt for T {}
+
+/// Represents a type that can convert into endpoint.
+pub trait IntoEndpoint {
+    /// Represents the endpoint type.
+    type Endpoint: Endpoint;
+
+    /// Converts this object into endpoint.
+    fn into_endpoint(self) -> Self::Endpoint;
+}
+
+impl<T: Endpoint> IntoEndpoint for T {
+    type Endpoint = T;
+
+    fn into_endpoint(self) -> Self::Endpoint {
+        self
+    }
+}
+
+pub trait Middleware<E: Endpoint> {
+    /// New endpoint type.
+    ///
+    /// If you don't know what type to use, then you can use
+    /// [`BoxEndpoint`](crate::endpoint::BoxEndpoint), which will bring some
+    /// performance loss, but it is insignificant.
+    type Output: Endpoint;
+
+    /// Transform the input [`Endpoint`] to another one.
+    fn transform(&self, ep: E) -> Self::Output;
 }
 
 // #[handler]
@@ -278,3 +356,53 @@ impl Endpoint for hello_json {
     }
 }
 
+/// The top-level builder for an Actix Web application.
+///
+struct ChannelServer {
+    extensions: Extensions,
+}
+
+impl ChannelServer {
+    pub fn data<U: 'static>(mut self, ext: U) -> Self {
+        self.extensions.insert(ext);
+        self
+    }
+}
+
+pub struct Route {
+    map: AHashMap<&'static str, Box<dyn Endpoint<Output = Response>>>,
+}
+
+impl Endpoint for Route {
+    type Output = Response;
+
+    fn call(&self, mut req: Request) -> Result<Self::Output, Error> {
+        if self.map.contains_key(req.uri()) {
+            let ep = &self.map[req.uri()];
+            ep.call(req)
+        } else {
+            Err(Error::PathNotFoundError(req.uri().into()))
+        }
+    }
+}
+
+impl Route {
+    pub fn new() -> Self {
+        Self {
+            map: AHashMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn at(mut self, path: &'static str, ep: Box<dyn Endpoint<Output = Response>>) -> Self {
+        if self.map.contains_key(path) {
+            panic!("duplicate path: {}", path);
+        }
+        self.map.insert(path, ep);
+        self
+    }
+}
+
+fn test() {
+    let route = Route::new().at("hello", Box::new(hello)).data(1);
+}
