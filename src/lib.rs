@@ -434,14 +434,21 @@ impl ChannelServer {
 #[test]
 fn test() {
     let route = Route::new()
-        .at("hello_json", Box::new(hello_json.data(1)))
+        .at("hello", Box::new(hello))
+        .at("hello_json", Box::new(hello_json))
         .data(1);
 
     let request = Request::with_body(
-        "hello_json".into(),
-        Body::from_string(serde_json::to_string("this is a string").unwrap()),
+        "hello".into(),
+        Body::from_string("this is a string".to_string()),
     );
+    let res = route.get_response(request);
+    println!("res: {:?}", res);
 
+    let request = Request::with_body(
+        "hello_json".into(),
+        Body::from_string(serde_json::to_string("this is a json string").unwrap()),
+    );
     let res = route.get_response(request);
     println!("res: {:?}", res);
 }
