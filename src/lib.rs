@@ -404,5 +404,5 @@ impl Route {
 }
 
 fn test() {
-    let route = Route::new().at("hello", Box::new(hello)).data(1);
+    let route = Route::new().at("hello", Box::new(hello.data(1)));
 }
