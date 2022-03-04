@@ -1,14 +1,15 @@
 use add_data::{AddData, AddDataEndpoint};
 use ahash::AHashMap;
 use bytes::Bytes;
+use crossbeam::channel::{bounded, Receiver, Sender};
 use extensions::Extensions;
+use serde::Serialize;
 use std::{
-    any::Any,
     fmt::{Debug, Formatter},
     ops::Deref,
 };
 
-use crate::json::Json;
+use crate::{data::Data, json::Json};
 
 pub mod add_data;
 pub mod common;
@@ -24,8 +25,14 @@ pub type Stream = crossbeam::channel::Sender<Response>;
 pub struct Body(Option<Bytes>);
 
 impl Body {
+    pub fn empty() -> Body {
+        Self(None)
+    }
     pub fn take(&mut self) -> Result<Bytes, Error> {
         self.0.take().ok_or(Error::BodyHasBeenTaken)
+    }
+    pub fn from_string(body: String) -> Body {
+        Self(Some(body.into()))
     }
 }
 
@@ -43,15 +50,35 @@ pub struct Request {
     headers: String,
     /// 用于传递大数据
     body: Body,
-    /// 接收端 用它 和请求端通信
-    stream: Stream,
+    tx: Sender<Response>,
+    rx: Receiver<Response>,
     /// 主要是 Middleware 使用的
     extensions: Extensions,
 }
 
 impl Request {
+    pub fn new(uri: String, params: impl Serialize, body: Body) -> Request {
+        let (tx, rx) = bounded::<Response>(100);
+        Self {
+            uri,
+            headers: serde_json::to_string(&params).unwrap(),
+            body,
+            tx,
+            rx,
+            extensions: Extensions::new(),
+        }
+    }
+
+    pub fn with_params(uri: String, params: impl Serialize) -> Request {
+        Self::new(uri, params, Body::empty())
+    }
+
+    pub fn with_body(uri: String, body: Body) -> Request {
+        Self::new(uri, "", body)
+    }
+
     /// Returns the parameters used by the extractor.
-    pub fn split(mut self) -> (Request, Body) {
+    pub(crate) fn split(mut self) -> (Request, Body) {
         let body = std::mem::take(&mut self.body);
         (self, body)
     }
@@ -348,24 +375,12 @@ impl Endpoint for hello_json {
     fn call(&self, req: Request) -> Result<Self::Output, Error> {
         let (req, mut body) = req.split();
         let p0 = <Json<String> as FromRequest>::from_request(&req, &mut body)?;
-        fn hello_json(name: Json<String>) -> () {
-            format!("hello: {:?}", &name);
+        let p1 = <Data<&i32> as FromRequest>::from_request(&req, &mut body)?;
+        fn hello_json(json: Json<String>, data: Data<&i32>) -> String {
+            format!("hello: {}, data: {}", json.0, data.0)
         }
-        let res = hello_json(p0);
+        let res = hello_json(p0, p1);
         Ok(res.into_response())
-    }
-}
-
-/// The top-level builder for an Actix Web application.
-///
-struct ChannelServer {
-    extensions: Extensions,
-}
-
-impl ChannelServer {
-    pub fn data<U: 'static>(mut self, ext: U) -> Self {
-        self.extensions.insert(ext);
-        self
     }
 }
 
@@ -376,7 +391,7 @@ pub struct Route {
 impl Endpoint for Route {
     type Output = Response;
 
-    fn call(&self, mut req: Request) -> Result<Self::Output, Error> {
+    fn call(&self, req: Request) -> Result<Self::Output, Error> {
         if self.map.contains_key(req.uri()) {
             let ep = &self.map[req.uri()];
             ep.call(req)
@@ -403,6 +418,30 @@ impl Route {
     }
 }
 
+/// The top-level builder for an Actix Web application.
+///
+struct ChannelServer {
+    extensions: Extensions,
+}
+
+impl ChannelServer {
+    pub fn data<U: 'static>(mut self, ext: U) -> Self {
+        self.extensions.insert(ext);
+        self
+    }
+}
+
+#[test]
 fn test() {
-    let route = Route::new().at("hello", Box::new(hello.data(1)));
+    let route = Route::new()
+        .at("hello_json", Box::new(hello_json.data(1)))
+        .data(1);
+
+    let request = Request::with_body(
+        "hello_json".into(),
+        Body::from_string(serde_json::to_string("this is a string").unwrap()),
+    );
+
+    let res = route.get_response(request);
+    println!("res: {:?}", res);
 }
