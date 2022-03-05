@@ -11,7 +11,7 @@ use ahash::AHashMap;
 #[derive(Default)]
 pub struct Extensions {
     /// Use AHasher with a std HashMap with for faster lookups on the small `TypeId` keys.
-    map: AHashMap<TypeId, Box<dyn Any>>,
+    map: AHashMap<TypeId, Box<dyn Any + Send>>,
 }
 
 impl Extensions {
@@ -35,7 +35,7 @@ impl Extensions {
     /// assert_eq!(map.insert(2u32), Some(1u32));
     /// assert_eq!(*map.get::<u32>().unwrap(), 2u32);
     /// ```
-    pub fn insert<T: 'static>(&mut self, val: T) -> Option<T> {
+    pub fn insert<T: 'static + Send>(&mut self, val: T) -> Option<T> {
         self.map
             .insert(TypeId::of::<T>(), Box::new(val))
             .and_then(downcast_owned)
@@ -97,7 +97,7 @@ impl Extensions {
     /// assert_eq!(map.remove::<u32>(), Some(1u32));
     /// assert!(!map.contains::<u32>());
     /// ```
-    pub fn remove<T: 'static>(&mut self) -> Option<T> {
+    pub fn remove<T: 'static + Send>(&mut self) -> Option<T> {
         self.map.remove(&TypeId::of::<T>()).and_then(downcast_owned)
     }
 
@@ -130,7 +130,7 @@ impl fmt::Debug for Extensions {
     }
 }
 
-fn downcast_owned<T: 'static>(boxed: Box<dyn Any>) -> Option<T> {
+fn downcast_owned<T: 'static + Send>(boxed: Box<dyn Any + Send>) -> Option<T> {
     boxed.downcast().ok().map(|boxed| *boxed)
 }
 

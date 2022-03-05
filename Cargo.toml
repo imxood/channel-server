@@ -7,11 +7,9 @@ edition = "2021"
 
 [dependencies]
 ahash = "0.7.6"
-anyhow = "1.0.55"
 bytes = "1.1.0"
 crossbeam = "0.8.1"
-egui = "0.17.0"
 log = "0.4.14"
-serde = "1.0.136"
+serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.79"
 thiserror = "1.0.30"
