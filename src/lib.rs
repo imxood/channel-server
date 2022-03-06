@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Debug, Formatter},
     ops::Deref,
+    sync::{Arc, RwLock},
 };
 
 use crate::{
@@ -109,7 +110,7 @@ impl Request {
     }
 
     /// Returns the parameters used by the extractor.
-    pub(crate) fn split(mut self) -> (Request, Body) {
+    pub fn split(mut self) -> (Request, Body) {
         let body = std::mem::take(&mut self.body);
         (self, body)
     }
@@ -149,6 +150,7 @@ pub enum StatusCode {
     Fail(String),
     Pending(String),
     Ready(String),
+    NotStart(String),
 }
 
 impl Default for StatusCode {
@@ -169,6 +171,14 @@ impl StatusCode {
     }
     pub fn ready() -> Self {
         Self::Ready("准备就绪".into())
+    }
+
+    pub fn not_start() -> Self {
+        Self::NotStart("未执行".into())
+    }
+
+    pub fn is_ok(&self) -> bool {
+        matches!(self, StatusCode::Ok(_))
     }
 }
 
@@ -211,6 +221,10 @@ impl Response {
         &self.uri
     }
 
+    pub fn is_ok(&self) -> bool {
+        self.status.is_ok()
+    }
+
     #[inline]
     pub fn take_body(&mut self) -> Body {
         std::mem::take(&mut self.body)
@@ -225,6 +239,7 @@ impl Debug for Response {
             0
         };
         f.debug_struct("Response")
+            .field("uri", &self.uri)
             .field("status", &self.status)
             .field("body length", &len)
             .finish()
@@ -243,9 +258,12 @@ pub trait Endpoint: Send + Sync {
     fn call(&self, req: Request) -> Result<Self::Output, Error>;
 
     fn get_response(&self, req: Request) -> Response {
-        self.call(req)
+        let uri = req.uri_ref().to_string();
+        let mut res = self
+            .call(req)
             .map(IntoResponse::into_response)
-            .unwrap_or_else(|err| err.into_response())
+            .unwrap_or_else(|err| err.into_response());
+        res.uri(uri)
     }
 }
 
@@ -298,7 +316,16 @@ pub trait FromRequest<'a>: Sized {
     }
 }
 
+pub type BoxEndpoint<'a, T = Response> = Box<dyn Endpoint<Output = T> + 'a>;
+
 pub trait EndpointExt: IntoEndpoint {
+    fn boxed<'a>(self) -> BoxEndpoint<'a, <Self::Endpoint as Endpoint>::Output>
+    where
+        Self: Sized + 'a,
+    {
+        Box::new(self.into_endpoint())
+    }
+
     fn data<T>(self, data: T) -> AddDataEndpoint<Self::Endpoint, T>
     where
         T: Clone + Send + Sync + 'static,
@@ -343,57 +370,9 @@ pub trait Middleware<E: Endpoint> {
 //     format!("hello: {}", name)
 // }
 
-struct hello;
-
-impl Endpoint for hello {
-    type Output = Response;
-
-    fn call(&self, req: Request) -> Result<Self::Output, Error> {
-        let (req, mut body) = req.split();
-        let p0 = <String as FromRequest>::from_request(&req, &mut body)?;
-        fn hello(name: String) -> String {
-            let res = format!("hello: {}", name);
-            println!("\t{}", &res);
-            res
-        }
-        let res = hello(p0);
-        Ok(res.into_response())
-    }
-}
-
-// #[handler]
-// fn hello_json(name: Json<String>) -> () {
-//     format!("hello: {:?}", &name);
-// }
-
-#[derive(Default, Debug, Serialize, Deserialize)]
-struct User {
-    name: String,
-}
-
-struct hello_json;
-
-impl Endpoint for hello_json {
-    type Output = Response;
-
-    fn call(&self, req: Request) -> Result<Self::Output, Error> {
-        let (req, mut body) = req.split();
-        let p0 = <param::Param<User> as FromRequest>::from_request(&req, &mut body)?;
-        let p1 = <Json<String> as FromRequest>::from_request(&req, &mut body)?;
-        let p2 = <Data<&i32> as FromRequest>::from_request(&req, &mut body)?;
-        fn hello_json(user: param::Param<User>, json: Json<String>, data: Data<&i32>) -> String {
-            let res = format!("user: {:?}, json: {}, data: {}", user, json.0, data.0);
-            println!("\t{}", &res);
-            res
-        }
-        let res = hello_json(p0, p1, p2);
-        Ok(res.into_response())
-    }
-}
-
 #[derive(Default)]
 pub struct Route {
-    map: AHashMap<&'static str, Box<dyn Endpoint<Output = Response>>>,
+    map: AHashMap<&'static str, BoxEndpoint<'static>>,
 }
 
 impl Endpoint for Route {
@@ -420,44 +399,37 @@ impl Route {
     }
 }
 
-struct ChannelServer {
+pub struct ChannelServer {
     rx: Receiver<Request>,
     tx: Sender<Response>,
 }
 
 impl ChannelServer {
-    fn new(req_rx: Receiver<Request>, res_tx: Sender<Response>) -> ChannelServer {
+    pub(crate) fn new(req_rx: Receiver<Request>, res_tx: Sender<Response>) -> ChannelServer {
         Self {
             rx: req_rx,
             tx: res_tx,
         }
     }
 
-    pub fn run(&self, ep: impl Endpoint + Clone + Send + 'static) {
+    pub fn run(&self, ep: Arc<RwLock<impl Endpoint + 'static>>) {
         while let Ok(req) = self.rx.recv() {
             let ep = ep.clone();
             let tx = self.tx.clone();
             std::thread::spawn(move || {
-                let res = ep.get_response(req);
+                let res = ep.read().unwrap().get_response(req);
                 tx.try_send(res).ok();
             });
         }
     }
 }
-struct ChannelClient {
+pub struct ChannelClient {
     tx: Sender<Request>,
     rx: Receiver<Response>,
     res_queue: Vec<Response>,
 }
 
 impl ChannelClient {
-    pub fn new(tx: Sender<Request>, rx: Receiver<Response>) -> ChannelClient {
-        Self {
-            tx,
-            rx,
-            res_queue: Vec::new(),
-        }
-    }
     /// 发起请求
     pub fn req(&mut self, req: Request) -> Result<(), Error> {
         // 先检查队列中是否有这个请求
@@ -477,9 +449,11 @@ impl ChannelClient {
         self.tx.try_send(req).map_err(|e| Error::ReqSendError)
     }
 
-    /// 处理消息队列, 返回一个消息用于显示消息状态
-    pub fn poll_once(&mut self) -> Option<&Response> {
+    /// 处理消息队列
+    /// 返回值为 true 表示 接收到 响应
+    pub fn run_once(&mut self) -> bool {
         // println!("queue: {:?}", self.queue.len());
+        let mut recved = false;
         while let Ok(res) = self.rx.try_recv() {
             // 找到对应的req
             let item = self
@@ -488,13 +462,32 @@ impl ChannelClient {
                 .find(|r| r.uri_ref() == res.uri_ref());
             if let Some(r) = item {
                 *r = res;
+                recved = true;
             }
         }
-        self.res_queue.last()
+        recved
+    }
+
+    /// 根据 uri 获得请求结果
+    pub fn search(&self, uri: &str) -> Option<&Response> {
+        self.res_queue.iter().find(|res| res.uri_ref() == uri)
+    }
+
+    /// 清除 response
+    pub fn clean(&mut self, uri: &str) {
+        self.res_queue.retain(|res| res.uri_ref() != uri);
+    }
+
+    pub(crate) fn new(tx: Sender<Request>, rx: Receiver<Response>) -> ChannelClient {
+        Self {
+            tx,
+            rx,
+            res_queue: Vec::new(),
+        }
     }
 }
 
-struct ChannelService {
+pub struct ChannelService {
     client: ChannelClient,
     server: ChannelServer,
 }
@@ -512,31 +505,4 @@ impl ChannelService {
         let Self { client, server } = self;
         (client, server)
     }
-}
-
-#[test]
-fn test() {
-    let route = Route::default()
-        .at("hello", Box::new(hello))
-        .at("hello_json", Box::new(hello_json))
-        .data(1);
-
-    // 测试1
-    let request = Request::with_body(
-        "hello".into(),
-        Body::from_string("this is a string".to_string()),
-    );
-    let res = route.get_response(request);
-    println!("res: {:?}", res);
-
-    // 测试2
-    let request = Request::new(
-        "hello_json".into(),
-        Param::from_obj(User {
-            name: "maxu".to_string(),
-        }),
-        Body::from_string(serde_json::to_string("this is a json string").unwrap()),
-    );
-    let res = route.get_response(request);
-    println!("res: {:?}", res);
 }

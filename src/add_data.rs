@@ -26,7 +26,7 @@ where
     }
 }
 
-/// Endpoint for AddData middleware.
+#[derive(Clone)]
 pub struct AddDataEndpoint<E, T> {
     inner: E,
     value: T,
