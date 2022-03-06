@@ -1,4 +1,4 @@
-use crate::{Endpoint, Error, Middleware, Request};
+use crate::{Endpoint, ChannelError, Middleware, Request};
 /// Middleware for add any data to request.
 pub struct AddData<T> {
     value: T,
@@ -39,7 +39,7 @@ where
 {
     type Output = E::Output;
 
-    fn call(&self, mut req: Request) -> Result<Self::Output, Error> {
+    fn call(&self, mut req: Request) -> Result<Self::Output, ChannelError> {
         req.extensions_mut().insert(self.value.clone());
         self.inner.call(req)
     }

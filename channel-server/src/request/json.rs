@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::{Body, Error, FromRequest, IntoResponse, Request, Response, StatusCode};
+use crate::{Body, ChannelError, FromRequest, IntoResponse, Request, Response, StatusCode};
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct Json<T>(pub T);
@@ -22,10 +22,10 @@ impl<T> DerefMut for Json<T> {
 }
 
 impl<'a, T: DeserializeOwned> FromRequest<'a> for Json<T> {
-    fn from_request(_req: &'a Request, body: &mut Body) -> Result<Self, Error> {
+    fn from_request(_req: &'a Request, body: &mut Body) -> Result<Self, ChannelError> {
         let data = body.take()?;
         Ok(Self(
-            serde_json::from_slice(data.as_ref()).map_err(|_e| Error::ParseJsonError)?,
+            serde_json::from_slice(data.as_ref()).map_err(|_e| ChannelError::ParseJsonError)?,
         ))
     }
 }

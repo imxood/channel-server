@@ -3,28 +3,22 @@ use ahash::AHashMap;
 use bytes::Bytes;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use extensions::Extensions;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     fmt::{Debug, Formatter},
     ops::Deref,
     sync::{Arc, RwLock},
 };
 
-use crate::{
-    data::Data,
-    request::{json::Json, param},
-};
-
 pub mod add_data;
 pub mod common;
-pub mod data;
 pub mod extensions;
 pub mod request;
 pub mod response;
 
-// pub mod runtime;
+pub mod prelude;
 
-pub type Stream = crossbeam::channel::Sender<Response>;
+pub use inner_derive::handler;
 
 #[derive(Default, Clone)]
 pub struct Body(Option<Bytes>);
@@ -37,8 +31,8 @@ impl Body {
         Self(None)
     }
 
-    pub fn take(&mut self) -> Result<Bytes, Error> {
-        self.0.take().ok_or(Error::BodyNoData)
+    pub fn take(&mut self) -> Result<Bytes, ChannelError> {
+        self.0.take().ok_or(ChannelError::BodyNoData)
     }
 
     pub fn from_string(body: String) -> Body {
@@ -59,11 +53,11 @@ impl Param {
         Self(Some(serde_json::to_string(&obj).unwrap()))
     }
 
-    pub fn as_ref(&self) -> Result<&String, Error> {
+    pub fn as_ref(&self) -> Result<&String, ChannelError> {
         if let Some(param) = self.0.as_ref() {
             Ok(param)
         } else {
-            Err(Error::ParamNoData)
+            Err(ChannelError::ParamNoData)
         }
     }
 }
@@ -82,21 +76,16 @@ pub struct Request {
     param: Param,
     /// 用于传递大数据
     body: Body,
-    tx: Sender<Response>,
-    rx: Receiver<Response>,
     /// 主要是 Middleware 使用的
     extensions: Extensions,
 }
 
 impl Request {
     pub fn new(uri: String, param: Param, body: Body) -> Request {
-        let (tx, rx) = bounded::<Response>(100);
         Self {
             uri,
             param,
             body,
-            tx,
-            rx,
             extensions: Extensions::new(),
         }
     }
@@ -255,11 +244,11 @@ pub trait Endpoint: Send + Sync {
     type Output: IntoResponse;
 
     /// Get the response to the request.
-    fn call(&self, req: Request) -> Result<Self::Output, Error>;
+    fn call(&self, req: Request) -> Result<Self::Output, ChannelError>;
 
     fn get_response(&self, req: Request) -> Response {
         let uri = req.uri_ref().to_string();
-        let mut res = self
+        let res = self
             .call(req)
             .map(IntoResponse::into_response)
             .unwrap_or_else(|err| err.into_response());
@@ -268,7 +257,7 @@ pub trait Endpoint: Send + Sync {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum ChannelError {
     #[error("请求已经在队列中")]
     ReqExistInQueue,
     #[error("请求发送失败")]
@@ -303,15 +292,15 @@ pub enum Error {
     Custom(String),
 }
 
-impl IntoResponse for Error {
+impl IntoResponse for ChannelError {
     fn into_response(self) -> Response {
         Response::new().status(StatusCode::Fail(self.to_string()))
     }
 }
 
 pub trait FromRequest<'a>: Sized {
-    fn from_request(req: &'a Request, body: &mut Body) -> Result<Self, Error>;
-    fn from_request_without_body(req: &'a Request) -> Result<Self, Error> {
+    fn from_request(req: &'a Request, body: &mut Body) -> Result<Self, ChannelError>;
+    fn from_request_without_body(req: &'a Request) -> Result<Self, ChannelError> {
         Self::from_request(req, &mut Default::default())
     }
 }
@@ -370,31 +359,43 @@ pub trait Middleware<E: Endpoint> {
 //     format!("hello: {}", name)
 // }
 
-#[derive(Default)]
+#[derive(Clone)]
 pub struct Route {
-    map: AHashMap<&'static str, BoxEndpoint<'static>>,
+    map: Arc<RwLock<AHashMap<&'static str, BoxEndpoint<'static>>>>,
+}
+
+impl Route {
+    pub fn new() -> Self {
+        Self {
+            map: Arc::default(),
+        }
+    }
 }
 
 impl Endpoint for Route {
     type Output = Response;
 
-    fn call(&self, req: Request) -> Result<Self::Output, Error> {
-        if self.map.contains_key(req.uri_ref()) {
-            let ep = &self.map[req.uri_ref()];
+    fn call(&self, req: Request) -> Result<Self::Output, ChannelError> {
+        let map = self.map.read().unwrap();
+        if map.contains_key(req.uri_ref()) {
+            let ep = &map[req.uri_ref()];
             ep.call(req)
         } else {
-            Err(Error::PathNotFoundError(req.uri_ref().into()))
+            Err(ChannelError::PathNotFoundError(req.uri_ref().into()))
         }
     }
 }
 
 impl Route {
     #[must_use]
-    pub fn at(mut self, path: &'static str, ep: Box<dyn Endpoint<Output = Response>>) -> Self {
-        if self.map.contains_key(path) {
-            panic!("duplicate path: {}", path);
+    pub fn at(self, path: &'static str, ep: Box<dyn Endpoint<Output = Response>>) -> Self {
+        {
+            let mut map = self.map.write().unwrap();
+            if map.contains_key(path) {
+                panic!("duplicate path: {}", path);
+            }
+            map.insert(path, ep);
         }
-        self.map.insert(path, ep);
         self
     }
 }
@@ -412,12 +413,12 @@ impl ChannelServer {
         }
     }
 
-    pub fn run(&self, ep: Arc<RwLock<impl Endpoint + 'static>>) {
+    pub fn run(&self, ep: impl Endpoint + 'static + Clone) {
         while let Ok(req) = self.rx.recv() {
             let ep = ep.clone();
             let tx = self.tx.clone();
             std::thread::spawn(move || {
-                let res = ep.read().unwrap().get_response(req);
+                let res = ep.get_response(req);
                 tx.try_send(res).ok();
             });
         }
@@ -431,14 +432,14 @@ pub struct ChannelClient {
 
 impl ChannelClient {
     /// 发起请求
-    pub fn req(&mut self, req: Request) -> Result<(), Error> {
+    pub fn req(&mut self, req: Request) -> Result<(), ChannelError> {
         // 先检查队列中是否有这个请求
         let item = self
             .res_queue
             .iter()
             .find(|res| res.uri_ref() == req.uri_ref());
         if item.is_some() {
-            return Err(Error::ReqExistInQueue);
+            return Err(ChannelError::ReqExistInQueue);
         }
 
         // 添加 请求状态
@@ -446,7 +447,9 @@ impl ChannelClient {
             .push(Response::new().uri(req.uri_ref().into()));
 
         // 发送请求
-        self.tx.try_send(req).map_err(|e| Error::ReqSendError)
+        self.tx
+            .try_send(req)
+            .map_err(|_e| ChannelError::ReqSendError)
     }
 
     /// 处理消息队列
@@ -501,7 +504,7 @@ impl ChannelService {
         Self { client, server }
     }
 
-    pub fn split(mut self) -> (ChannelClient, ChannelServer) {
+    pub fn split(self) -> (ChannelClient, ChannelServer) {
         let Self { client, server } = self;
         (client, server)
     }

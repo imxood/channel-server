@@ -4,6 +4,8 @@
 
 主要用于多线程环境下, 像 egui 这样的实时应用, 可以完美使用
 
+参考了 油条哥 的 [web framework](https://github.com/poem-web/poem/tree/master/poem/src)
+
 ## 例子
 
 cargo run --example sample
