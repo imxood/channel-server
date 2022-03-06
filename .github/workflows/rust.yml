@@ -19,4 +19,4 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
     - name: Publish
-      run: cargo publish
+      run: cargo publish -p channel-server
