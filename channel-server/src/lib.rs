@@ -19,7 +19,7 @@ pub mod response;
 
 pub mod prelude;
 
-pub use inner_derive::handler;
+pub use channel_server_derive::handler;
 
 #[derive(Default, Clone)]
 pub struct Body(Option<Bytes>);

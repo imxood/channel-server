@@ -1,2 +1,2 @@
 [workspace]
-members = ["inner-derive", "channel-server"]
+members = ["channel-server-derive", "channel-server"]
