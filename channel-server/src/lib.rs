@@ -81,9 +81,9 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn new(uri: String, param: Param, body: Body) -> Request {
+    pub fn new(uri: impl Into<String>, param: Param, body: Body) -> Request {
         Self {
-            uri,
+            uri: uri.into(),
             param,
             body,
             extensions: Extensions::new(),
@@ -135,10 +135,15 @@ impl Debug for Request {
 
 #[derive(Debug, Clone)]
 pub enum StatusCode {
+    /// 执行成功
     Ok(String),
+    /// 执行失败
     Fail(String),
-    Pending(String),
+    /// 准备就绪
     Ready(String),
+    /// 执行中
+    Pending(String),
+    /// 还未开始
     NotStart(String),
 }
 
@@ -388,19 +393,19 @@ impl Endpoint for Route {
 
 impl Route {
     #[must_use]
-    pub fn at(self, path: &'static str, ep: Box<dyn Endpoint<Output = Response>>) -> Self {
+    pub fn at(self, path: &'static str, ep: impl Endpoint<Output = Response> + 'static) -> Self {
         {
             let mut map = self.map.write().unwrap();
             if map.contains_key(path) {
                 panic!("duplicate path: {}", path);
             }
-            map.insert(path, ep);
+            map.insert(path, ep.boxed());
         }
         self
     }
 }
 
-pub struct ChannelServer {
+struct ChannelServer {
     rx: Receiver<Request>,
     tx: Sender<Response>,
 }
@@ -413,17 +418,21 @@ impl ChannelServer {
         }
     }
 
-    pub fn run(&self, ep: impl Endpoint + 'static + Clone) {
-        while let Ok(req) = self.rx.recv() {
-            let ep = ep.clone();
-            let tx = self.tx.clone();
-            std::thread::spawn(move || {
-                let res = ep.get_response(req);
-                tx.try_send(res).ok();
-            });
-        }
+    pub fn run(self, ep: impl Endpoint + 'static + Clone) {
+        std::thread::spawn(move || {
+            while let Ok(req) = self.rx.recv() {
+                let ep = ep.clone();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let res = ep.get_response(req);
+                    tx.try_send(res).ok();
+                });
+            }
+        });
     }
 }
+
+#[derive(Clone)]
 pub struct ChannelClient {
     tx: Sender<Request>,
     rx: Receiver<Response>,
@@ -431,6 +440,34 @@ pub struct ChannelClient {
 }
 
 impl ChannelClient {
+    pub fn req_with_param(
+        &mut self,
+        uri: impl Into<String>,
+        param: Param,
+    ) -> Result<(), ChannelError> {
+        let req = Request::new(uri.into(), param, Body::empty());
+        self.req(req)
+    }
+
+    pub fn req_with_body(
+        &mut self,
+        uri: impl Into<String>,
+        body: Body,
+    ) -> Result<(), ChannelError> {
+        let req = Request::new(uri.into(), Param::empty(), body);
+        self.req(req)
+    }
+
+    pub fn req_with_param_body(
+        &mut self,
+        uri: impl Into<String>,
+        param: Param,
+        body: Body,
+    ) -> Result<(), ChannelError> {
+        let req = Request::new(uri.into(), param, body);
+        self.req(req)
+    }
+
     /// 发起请求
     pub fn req(&mut self, req: Request) -> Result<(), ChannelError> {
         // 先检查队列中是否有这个请求
@@ -447,9 +484,7 @@ impl ChannelClient {
             .push(Response::new().uri(req.uri_ref().into()));
 
         // 发送请求
-        self.tx
-            .try_send(req)
-            .map_err(|_e| ChannelError::ReqSendError)
+        self.tx.send(req).map_err(|_e| ChannelError::ReqSendError)
     }
 
     /// 处理消息队列
@@ -490,22 +525,15 @@ impl ChannelClient {
     }
 }
 
-pub struct ChannelService {
-    client: ChannelClient,
-    server: ChannelServer,
-}
+pub struct ChannelService {}
 
 impl ChannelService {
-    pub fn new() -> ChannelService {
+    pub fn start(ep: impl Endpoint + 'static + Clone) -> ChannelClient {
         let (req_tx, req_rx) = bounded::<Request>(100);
         let (res_tx, res_rx) = bounded::<Response>(100);
         let client = ChannelClient::new(req_tx, res_rx);
         let server = ChannelServer::new(req_rx, res_tx);
-        Self { client, server }
-    }
-
-    pub fn split(self) -> (ChannelClient, ChannelServer) {
-        let Self { client, server } = self;
-        (client, server)
+        server.run(ep);
+        client
     }
 }

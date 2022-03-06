@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{thread::current, time::Instant};
 
 use channel_server::prelude::*;
 
@@ -10,54 +10,43 @@ struct User {
 #[handler]
 fn hello(name: String) -> String {
     let res = format!("hello: {}", name);
-    println!("\t{}", &res);
+    println!("tid:{:?} {}", current().id(), &res);
     res
 }
 
 #[handler]
 fn hello_json(user: ReqParam<User>, json: Json<String>, data: Data<&i32>) -> String {
     let res = format!("user: {:?}, json: {}, data: {}", user, json.0, data.0);
-    println!("\t{}", &res);
+    println!("tid:{:?} {}", current().id(), &res);
     res
 }
 
 fn main() -> Result<(), ChannelError> {
-    let ep = Route::new()
-        .at("hello", hello.boxed())
-        .at("hello_json", hello_json.boxed())
-        .data(1);
+    let uri1 = "/hello";
+    let uri2 = "/hello_json";
 
-    let (mut client, server) = ChannelService::new().split();
+    let ep = Route::new().at(uri1, hello).at(uri2, hello_json).data(1);
 
-    // 服务端
-    std::thread::spawn(move || {
-        server.run(ep);
-    });
+    let mut client = ChannelService::start(ep);
 
     println!("执行开始");
     let start_time = Instant::now();
 
     // 客户端
-    let uri1 = "hello".to_string();
-    let request = Request::with_body(
-        uri1.clone(),
-        Body::from_string("this is a string".to_string()),
-    );
-    client.req(request)?;
+    client.req_with_body(uri1, Body::from_string("this is a string".to_string()))?;
 
-    let uri2 = "hello_json".to_string();
-    let request = Request::new(
-        uri2.clone(),
+    client.req_with_param_body(
+        uri2,
         Param::from_obj(User {
             name: "maxu".to_string(),
         }),
         Body::from_string(serde_json::to_string("this is a json string").unwrap()),
-    );
-    client.req(request)?;
+    )?;
+
+    let mut res1_ok = false;
+    let mut res2_ok = false;
 
     loop {
-        let mut res1_ok = false;
-        let mut res2_ok = true;
         // 运行队列, 接收 response
         if client.run_once() {
             // 查询执行结果
