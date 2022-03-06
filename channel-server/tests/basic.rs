@@ -21,7 +21,8 @@ fn hello_json(user: ReqParam<User>, json: Json<String>, data: Data<&i32>) -> Str
     res
 }
 
-fn main() -> Result<(), ChannelError> {
+#[test]
+fn test_basic() -> Result<(), ChannelError> {
     let uri1 = "/hello";
     let uri2 = "/hello_json";
     let topic_uri = "/topic/video";
