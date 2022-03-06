@@ -5,6 +5,7 @@ use crossbeam::channel::{bounded, Receiver, Sender};
 use extensions::Extensions;
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     fmt::{Debug, Formatter},
     ops::Deref,
     sync::{Arc, RwLock},
@@ -192,6 +193,14 @@ impl Response {
         }
     }
 
+    pub fn topic(uri: &str) -> Self {
+        Self {
+            uri: uri.into(),
+            status: StatusCode::ok(),
+            body: Body(None),
+        }
+    }
+
     pub fn body(mut self, body: Bytes) -> Self {
         self.body = Body(Some(body));
         self
@@ -211,7 +220,7 @@ impl Response {
         self
     }
 
-    pub fn uri_ref(&self) -> &String {
+    pub fn uri_ref(&self) -> &str {
         &self.uri
     }
 
@@ -406,37 +415,53 @@ impl Route {
 }
 
 struct ChannelServer {
-    rx: Receiver<Request>,
-    tx: Sender<Response>,
+    res_rx: Receiver<Request>,
+    req_tx: Sender<Response>,
 }
 
 impl ChannelServer {
     pub(crate) fn new(req_rx: Receiver<Request>, res_tx: Sender<Response>) -> ChannelServer {
         Self {
-            rx: req_rx,
-            tx: res_tx,
+            res_rx: req_rx,
+            req_tx: res_tx,
         }
     }
 
     pub fn run(self, ep: impl Endpoint + 'static + Clone) {
         std::thread::spawn(move || {
-            while let Ok(req) = self.rx.recv() {
+            while let Ok(req) = self.res_rx.recv() {
                 let ep = ep.clone();
-                let tx = self.tx.clone();
+                let req_tx = self.req_tx.clone();
                 std::thread::spawn(move || {
                     let res = ep.get_response(req);
-                    tx.try_send(res).ok();
+                    req_tx.try_send(res).ok();
                 });
             }
         });
     }
 }
 
-#[derive(Clone)]
 pub struct ChannelClient {
-    tx: Sender<Request>,
-    rx: Receiver<Response>,
+    req_tx: Sender<Request>,
+    res_rx: Receiver<Response>,
     res_queue: Vec<Response>,
+    topic_rx: Receiver<Response>,
+    topic_queue: HashMap<&'static str, Vec<Response>>,
+}
+
+#[derive(Clone)]
+pub struct ChannelTopic {
+    topic_tx: Sender<Response>,
+}
+
+impl ChannelTopic {
+    pub fn new(topic_tx: Sender<Response>) -> Self {
+        Self { topic_tx }
+    }
+    pub fn publish(&self, res: Response) {
+        // 发送成功还是失败并不重要
+        self.topic_tx.send(res).ok();
+    }
 }
 
 impl ChannelClient {
@@ -484,16 +509,16 @@ impl ChannelClient {
             .push(Response::new().uri(req.uri_ref().into()));
 
         // 发送请求
-        self.tx.send(req).map_err(|_e| ChannelError::ReqSendError)
+        self.req_tx
+            .send(req)
+            .map_err(|_e| ChannelError::ReqSendError)
     }
 
     /// 处理消息队列
     /// 返回值为 true 表示 接收到 响应
     pub fn run_once(&mut self) -> bool {
-        // println!("queue: {:?}", self.queue.len());
         let mut recved = false;
-        while let Ok(res) = self.rx.try_recv() {
-            // 找到对应的req
+        while let Ok(res) = self.res_rx.try_recv() {
             let item = self
                 .res_queue
                 .iter_mut()
@@ -503,11 +528,18 @@ impl ChannelClient {
                 recved = true;
             }
         }
+        while let Ok(res) = self.topic_rx.try_recv() {
+            // 只有明确订阅的数据才会被添加到队列中
+            if let Some(queue) = self.topic_queue.get_mut(res.uri_ref()) {
+                queue.push(res);
+                recved = true;
+            }
+        }
         recved
     }
 
     /// 根据 uri 获得请求结果
-    pub fn search(&self, uri: &str) -> Option<&Response> {
+    pub fn fetch(&self, uri: &str) -> Option<&Response> {
         self.res_queue.iter().find(|res| res.uri_ref() == uri)
     }
 
@@ -516,11 +548,29 @@ impl ChannelClient {
         self.res_queue.retain(|res| res.uri_ref() != uri);
     }
 
-    pub(crate) fn new(tx: Sender<Request>, rx: Receiver<Response>) -> ChannelClient {
+    pub fn subject(&mut self, uri: &'static str) {
+        self.topic_queue.insert(uri, Vec::new());
+    }
+
+    pub fn fetch_topic(&mut self, uri: &'static str) -> Option<Vec<Response>> {
+        if self.topic_queue.contains_key(uri) {
+            self.topic_queue.insert(uri, Vec::new())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn new(
+        req_tx: Sender<Request>,
+        res_rx: Receiver<Response>,
+        topic_rx: Receiver<Response>,
+    ) -> ChannelClient {
         Self {
-            tx,
-            rx,
+            req_tx,
+            res_rx,
+            topic_rx,
             res_queue: Vec::new(),
+            topic_queue: HashMap::new(),
         }
     }
 }
@@ -528,12 +578,14 @@ impl ChannelClient {
 pub struct ChannelService {}
 
 impl ChannelService {
-    pub fn start(ep: impl Endpoint + 'static + Clone) -> ChannelClient {
+    pub fn start(ep: impl Endpoint + 'static + Clone) -> (ChannelClient, ChannelTopic) {
         let (req_tx, req_rx) = bounded::<Request>(100);
         let (res_tx, res_rx) = bounded::<Response>(100);
-        let client = ChannelClient::new(req_tx, res_rx);
+        let (topic_tx, topic_rx) = bounded::<Response>(100);
+        let client = ChannelClient::new(req_tx, res_rx, topic_rx);
         let server = ChannelServer::new(req_rx, res_tx);
+        let topic = ChannelTopic::new(topic_tx);
         server.run(ep);
-        client
+        (client, topic)
     }
 }
