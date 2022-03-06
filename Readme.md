@@ -1,3 +1,3 @@
-仿 web server 实现的 基于 线程间channel 的 客户端/服务端, 让线程间的 服务 变得更加容易
+基于channel的多线程client/server通信, 仿 web server, 可以 通过 uri 注册 服务, client 发起请求, server 响应请求
 
-可以 通过 uri 注册 服务, 可以共享全局数据
+主要用于多线程环境下, 像 egui 这样的实时应用, 可以完美使用
