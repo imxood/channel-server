@@ -7,5 +7,7 @@
 参考了 油条哥 的 [web framework](https://github.com/poem-web/poem/tree/master/poem/src)
 
 ## 例子
-
-cargo run --example sample
+```bash
+# channel-server\tests\basic.rs
+cargo test --package channel-server --test basic -- test_basic --exact --nocapture
+```
