@@ -8,6 +8,7 @@ repository = "https://github.com/imxood/channel-server"
 keywords = ["channel", "thread", "sync"]
 readme = "Readme.md"
 license = "MIT"
+description = "crate request/response topic-publish/subject by channels in multithreads"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

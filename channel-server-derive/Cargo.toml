@@ -7,6 +7,7 @@ homepage = "https://github.com/imxood/channel-server"
 repository = "https://github.com/imxood/channel-server"
 keywords = ["channel", "thread", "sync"]
 license = "MIT"
+description = "derive lib for channel-server crate"
 
 [lib]
 proc-macro = true
